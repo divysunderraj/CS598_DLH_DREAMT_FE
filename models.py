@@ -34,6 +34,86 @@ warnings.filterwarnings("ignore", category=RuntimeWarning)
 
 np.random.seed(1)
 
+import torch
+import torch.nn as nn
+
+class TransformerModel(nn.Module):    
+    def __init__(self, num_features, num_classes=2, d_model=128, nhead=8, 
+                 num_layers=2, dim_feedforward=256, dropout=0.1):
+        super().__init__()
+        self.input_proj = nn.Linear(num_features, d_model)
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model, nhead, dim_feedforward, dropout, batch_first=True
+        )
+        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers)
+        self.classifier = nn.Linear(d_model, num_classes)
+    
+    def forward(self, x, lengths=None):
+        x = self.input_proj(x)
+        x = self.transformer(x)
+        return self.classifier(x)
+
+
+def Transformer_eval(model, dataloader, list_true_stages, model_name):
+    from utils import calculate_metrics, plot_cm, cohen_kappa_score
+    
+    kappa = []
+    device = next(model.parameters()).device
+    model.eval()
+    probs_list = []
+    with torch.no_grad():
+        for batch in dataloader:
+            sample = batch['sample'].to(device)
+            outputs = model(sample)
+            probs = torch.softmax(outputs, dim=-1).cpu().numpy()
+            probs_list.extend(probs)
+            label = batch["label"].to(device)
+
+            # Calculating Cohen's Kappa Score, ensure labels and predictions are on CPU
+            kappa.append(
+                cohen_kappa_score(
+                    label.cpu().numpy()[0], np.argmax(outputs.cpu().numpy()[0], axis=1)
+                )
+            )
+    
+    y_true_flat = np.concatenate(list_true_stages)
+    y_pred_flat = np.vstack(probs_list)
+
+    trnsfm_test_results_df = calculate_metrics(y_true_flat, y_pred_flat, model_name)
+    trnsfm_test_results_df["Cohen's Kappa"] = np.average(kappa)
+
+    return trnsfm_test_results_df
+
+
+def Transformer_engine(dataloader_train, num_epoch=50, d_model=128, nhead=8, hidden_dim=256, learning_rate=0.001):
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    
+    num_features = dataloader_train.dataset[0]["sample"].shape[-1]
+    model = TransformerModel(
+        num_features, num_classes=2, d_model=d_model, 
+        nhead=nhead, num_layers=2, dim_feedforward=hidden_dim
+    ).to(device)
+    
+    optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate, weight_decay=1e-5)
+    loss_fn = nn.CrossEntropyLoss()
+    
+    for epoch in range(num_epoch):
+        model.train()
+        total_loss = 0
+        for batch in dataloader_train:
+            X = batch["sample"].to(device)
+            y = batch["label"].to(device)
+            optimizer.zero_grad()
+            outputs = model(X).view(-1, 2)
+            loss = loss_fn(outputs, y.view(-1))
+            loss.backward()
+            optimizer.step()
+            total_loss += loss.item()
+        if (epoch + 1) % 10 == 0:
+            print(f"Epoch {epoch+1}, Loss={total_loss/len(dataloader_train):.4f}")
+    
+    return model
+
 
 class BiLSTMPModel(nn.Module):
     def __init__(self, input_size, hidden_layer_size, output_size=2, dropout=0.5):
@@ -47,7 +127,7 @@ class BiLSTMPModel(nn.Module):
         )
         self.linear = nn.Linear(
             2 * hidden_layer_size, output_size
-        )  # 2 output units for 2 classes
+        )
 
     def forward(self, input_seq, lengths):
         packed_input = pack_padded_sequence(
@@ -55,7 +135,7 @@ class BiLSTMPModel(nn.Module):
         )
         packed_output, _ = self.lstm(packed_input)
         output, _ = pad_packed_sequence(packed_output, batch_first=True)
-        output = self.linear(output)  # Shape: [batch_size, seq_len, 2]
+        output = self.linear(output)  
         return output
 
 
